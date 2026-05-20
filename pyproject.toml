@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "healthsync"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "whoop-data>=0.4",
+    "tenacity>=8.2",
+    "click>=8.1",
+]
+
+[project.scripts]
+healthsync = "healthsync.__main__:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["healthsync"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.12",
+]

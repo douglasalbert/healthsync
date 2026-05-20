@@ -1,0 +1,17 @@
+[
+  {
+    "id": "cycle-001",
+    "start": "2025-05-18T07:00:00Z",
+    "end": "2025-05-19T07:00:00Z",
+    "score": {
+      "recovery_score": 78.0,
+      "hrv_rmssd_milli": 62.3,
+      "resting_heart_rate": 52.0,
+      "respiratory_rate": 15.2,
+      "spo2_percentage": 97.5
+    },
+    "strain": {
+      "score": 12.4
+    }
+  }
+]

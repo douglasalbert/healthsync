@@ -1,0 +1,26 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+.uv/
+uv.lock
+
+# Runtime state (per-machine, not shared)
+state/*.json
+*.healthsync/
+
+# Local config with credentials
+config/healthsync.toml
+*.local.toml
+
+# launchd plist with credentials
+scripts/com.healthsync.sync.plist
+
+# Swift build artifacts
+healthkit_writer/.build/
+healthkit_writer/*.app/
+healthkit_writer/*.xcodeproj/
+
+# macOS
+.DS_Store

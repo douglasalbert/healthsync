@@ -1,0 +1,27 @@
+[whoop]
+# Credentials can also be set via WHOOP_USERNAME / WHOOP_PASSWORD env vars.
+# Env vars take precedence over this file.
+username = ""
+password = ""
+
+[sync]
+# How many days back to pull on the very first run (no prior state).
+lookback_days = 7
+# HR resolution in seconds: 6, 60 (1 min), or 600 (10 min).
+# 60 is recommended — 6-second resolution produces ~100k samples per week.
+heart_rate_step_seconds = 60
+
+[healthkit]
+write_heart_rate = true
+write_hrv = true
+write_resting_hr = true
+write_respiratory_rate = true
+write_spo2 = true
+write_sleep_stages = true
+
+[paths]
+# Absolute path to the compiled Swift binary (inside its .app bundle wrapper).
+# Run ./scripts/build_swift.sh once to produce this binary.
+swift_binary = "~/healthsync/healthkit_writer/HealthSyncWriter.app/Contents/MacOS/healthkit-writer"
+state_file = "~/.healthsync/state.json"
+log_file = "~/Library/Logs/healthsync/sync.log"
