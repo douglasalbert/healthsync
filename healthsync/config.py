@@ -65,9 +65,16 @@ def _load_toml(path: Path) -> dict:
 
 
 def _keychain_password(account: str, service: str = "healthsync") -> str | None:
+    login_keychain = Path("~/Library/Keychains/login.keychain-db").expanduser()
     try:
         result = subprocess.run(
-            ["security", "find-generic-password", "-a", account, "-s", service, "-w"],
+            [
+                "security", "find-generic-password",
+                "-a", account,
+                "-s", service,
+                "-k", str(login_keychain),
+                "-w",
+            ],
             capture_output=True,
             text=True,
             timeout=5,
