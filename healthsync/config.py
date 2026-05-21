@@ -65,15 +65,16 @@ def _load_toml(path: Path) -> dict:
 
 
 def _keychain_password(account: str, service: str = "healthsync") -> str | None:
-    login_keychain = Path("~/Library/Keychains/login.keychain-db").expanduser()
+    # The keychain path is a positional argument, not a -k flag.
+    login_keychain = str(Path("~/Library/Keychains/login.keychain-db").expanduser())
     try:
         result = subprocess.run(
             [
                 "security", "find-generic-password",
                 "-a", account,
                 "-s", service,
-                "-k", str(login_keychain),
                 "-w",
+                login_keychain,
             ],
             capture_output=True,
             text=True,
@@ -119,9 +120,9 @@ def load_config(config_path: Path | None = None) -> Config:
             "  3) macOS Keychain (unlock your keychain first if needed):\n"
             "       security unlock-keychain ~/Library/Keychains/login.keychain-db\n"
             "       security add-generic-password -a whoop_username -s healthsync"
-            " -k ~/Library/Keychains/login.keychain-db -T '' -w 'your@email.com'\n"
+            " -T '' -w 'your@email.com' ~/Library/Keychains/login.keychain-db\n"
             "       security add-generic-password -a whoop_password -s healthsync"
-            " -k ~/Library/Keychains/login.keychain-db -T '' -w 'yourpassword'"
+            " -T '' -w 'yourpassword' ~/Library/Keychains/login.keychain-db"
         )
 
     raw_sync = raw.get("sync", {})

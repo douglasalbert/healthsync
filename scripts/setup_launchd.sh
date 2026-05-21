@@ -10,7 +10,6 @@ LABEL="com.healthsync.sync"
 PLIST_DST="$HOME/Library/LaunchAgents/$LABEL.plist"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Resolve uv and the project python
 UV_BIN="$(command -v uv 2>/dev/null || echo "")"
 if [ -z "$UV_BIN" ]; then
     echo "ERROR: uv not found. Install it first: https://docs.astral.sh/uv/getting-started/installation/"
@@ -19,58 +18,52 @@ fi
 
 LOGIN_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 
-# Try to unlock the login keychain so Keychain operations work without a UI prompt.
-# This is a no-op if it's already unlocked; it prompts for the keychain password if locked.
+# Unlock the login keychain if it is locked; no-op if already unlocked.
 _unlock_keychain() {
-    if ! security show-keychain-info "$LOGIN_KEYCHAIN" 2>&1 | grep -q "no-timeout\|timeout"; then
-        # Keychain is locked — attempt a silent unlock first, then fall back to prompting
-        security unlock-keychain "$LOGIN_KEYCHAIN" 2>/dev/null || true
-    fi
+    security unlock-keychain "$LOGIN_KEYCHAIN" 2>/dev/null || true
 }
 
-# Store a credential in the login keychain, or update it if it already exists.
-# Returns non-zero only on a hard failure (keychain truly inaccessible).
+# Store a credential. The keychain path is a positional arg, not a flag.
+# -U updates an existing entry so re-running the script is safe.
 _keychain_store() {
     local account="$1" value="$2"
-    # -U updates if already present; fall back to plain add on first run
     security add-generic-password \
         -a "$account" -s healthsync \
-        -w "$value" \
-        -k "$LOGIN_KEYCHAIN" \
-        -T "" \
-        2>/dev/null \
+        -T "" -w "$value" \
+        "$LOGIN_KEYCHAIN" 2>/dev/null \
     || security add-generic-password \
-        -U \
-        -a "$account" -s healthsync \
-        -w "$value" \
-        -k "$LOGIN_KEYCHAIN" \
-        -T "" \
-        2>/dev/null
+        -U -a "$account" -s healthsync \
+        -T "" -w "$value" \
+        "$LOGIN_KEYCHAIN" 2>/dev/null
 }
 
-# Prefer Keychain; fall back to storing the credential in the plist with chmod 600.
+# Read an existing credential from the keychain. Keychain path is positional.
+_keychain_read() {
+    local account="$1"
+    security find-generic-password \
+        -a "$account" -s healthsync \
+        -w "$LOGIN_KEYCHAIN" 2>/dev/null || true
+}
+
+# Prefer Keychain; fall back to storing credentials in the plist with chmod 600.
 # Sets KEYCHAIN_USED=1 when Keychain write succeeds, 0 otherwise.
 KEYCHAIN_USED=1
 get_secret() {
     local account="$1"
     local val
 
-    # Read existing value from Keychain (silently)
-    val=$(security find-generic-password -a "$account" -s healthsync \
-          -k "$LOGIN_KEYCHAIN" -w 2>/dev/null || true)
+    val=$(_keychain_read "$account")
     if [ -n "$val" ]; then
         echo "$val"
         return
     fi
 
-    # Prompt interactively
     read -rsp "Enter $account: " val
     echo "" >&2
 
-    # Try to persist in Keychain
     _unlock_keychain
     if _keychain_store "$account" "$val"; then
-        echo "  → saved to Keychain (launchd will read it from there)" >&2
+        echo "  → saved to Keychain" >&2
     else
         echo "  → Keychain write failed; credential will be stored in the plist (chmod 600)" >&2
         KEYCHAIN_USED=0
@@ -139,8 +132,8 @@ if [ "$CREDS_IN_KEYCHAIN" -eq 0 ]; then
     echo ""
     echo "NOTE: Credentials are stored in the plist (${PLIST_DST}) because"
     echo "      the Keychain was not accessible. The file is chmod 600."
-    echo "      To move them to Keychain later, unlock your keychain and re-run"
-    echo "      this script, or run:"
-    echo "        security add-generic-password -a whoop_username -s healthsync -k ~/Library/Keychains/login.keychain-db -w '<value>'"
-    echo "        security add-generic-password -a whoop_password -s healthsync -k ~/Library/Keychains/login.keychain-db -w '<value>'"
+    echo "      To move them to Keychain later:"
+    echo "        security unlock-keychain ~/Library/Keychains/login.keychain-db"
+    echo "        security add-generic-password -a whoop_username -s healthsync -T '' -w '<value>' ~/Library/Keychains/login.keychain-db"
+    echo "        security add-generic-password -a whoop_password -s healthsync -T '' -w '<value>' ~/Library/Keychains/login.keychain-db"
 fi
