@@ -22,5 +22,13 @@ healthkit_writer/.build/
 healthkit_writer/*.app/
 healthkit_writer/*.xcodeproj/
 
+# Xcode user settings and state
+xcuserdata/
+*.xcuserstate
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+DerivedData/
+
 # macOS
 .DS_Store

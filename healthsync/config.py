@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,26 +10,34 @@ class ConfigError(Exception):
     pass
 
 
+def _icloud_or_local(subdir: str) -> Path:
+    icloud = Path("~/Library/Mobile Documents/com~apple~CloudDocs").expanduser()
+    if icloud.exists():
+        return icloud / subdir
+    return Path(f"~/.healthsync/{subdir}").expanduser()
+
+
 @dataclass
-class WhoopConfig:
-    username: str
-    password: str
+class OAuthConfig:
+    client_id: str
+    client_secret: str
 
 
 @dataclass
 class SyncConfig:
     lookback_days: int = 7
-    heart_rate_step_seconds: int = 60
 
 
 @dataclass
 class HealthKitConfig:
-    write_heart_rate: bool = True
+    write_heart_rate: bool = False  # not available from the official WHOOP API
     write_hrv: bool = True
     write_resting_hr: bool = True
     write_respiratory_rate: bool = True
     write_spo2: bool = True
     write_sleep_stages: bool = True
+    write_active_energy: bool = True
+    write_skin_temp: bool = True
 
 
 @dataclass
@@ -43,14 +50,20 @@ class PathsConfig:
     state_file: Path = field(
         default_factory=lambda: Path("~/.healthsync/state.json").expanduser()
     )
+    token_file: Path = field(
+        default_factory=lambda: Path("~/.healthsync/tokens.json").expanduser()
+    )
     log_file: Path = field(
         default_factory=lambda: Path("~/Library/Logs/healthsync/sync.log").expanduser()
+    )
+    export_dir: Path = field(
+        default_factory=lambda: _icloud_or_local("HealthSync")
     )
 
 
 @dataclass
 class Config:
-    whoop: WhoopConfig
+    oauth: OAuthConfig
     sync: SyncConfig
     healthkit: HealthKitConfig
     paths: PathsConfig
@@ -64,65 +77,30 @@ def _load_toml(path: Path) -> dict:
         return {}
 
 
-def _keychain_password(account: str, service: str = "healthsync") -> str | None:
-    # The keychain path is a positional argument, not a -k flag.
-    login_keychain = str(Path("~/Library/Keychains/login.keychain-db").expanduser())
-    try:
-        result = subprocess.run(
-            [
-                "security", "find-generic-password",
-                "-a", account,
-                "-s", service,
-                "-w",
-                login_keychain,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    return None
-
-
 def load_config(config_path: Path | None = None) -> Config:
     if config_path is None:
         env_path = os.environ.get("HEALTHSYNC_CONFIG")
-        config_path = Path(env_path).expanduser() if env_path else Path("~/.healthsync/config.toml").expanduser()
+        config_path = (
+            Path(env_path).expanduser()
+            if env_path
+            else Path("~/.healthsync/config.toml").expanduser()
+        )
 
     raw = _load_toml(config_path)
+    raw_oauth = raw.get("oauth", {})
 
-    username = (
-        os.environ.get("WHOOP_USERNAME")
-        or raw.get("whoop", {}).get("username")
-        or _keychain_password("whoop_username")
-        or ""
-    )
-    password = (
-        os.environ.get("WHOOP_PASSWORD")
-        or raw.get("whoop", {}).get("password")
-        or _keychain_password("whoop_password")
-        or ""
-    )
+    client_id = os.environ.get("WHOOP_CLIENT_ID") or raw_oauth.get("client_id") or ""
+    client_secret = os.environ.get("WHOOP_CLIENT_SECRET") or raw_oauth.get("client_secret") or ""
 
-    if not username or not password:
+    if not client_id or not client_secret:
         raise ConfigError(
-            "WHOOP credentials not found. Choose one of:\n\n"
-            "  1) Environment variables (quickest):\n"
-            "       export WHOOP_USERNAME='your@email.com'\n"
-            "       export WHOOP_PASSWORD='yourpassword'\n\n"
-            "  2) Config file at ~/.healthsync/config.toml:\n"
-            "       mkdir -p ~/.healthsync\n"
-            "       cp config/healthsync.toml.example ~/.healthsync/config.toml\n"
-            "       # then fill in username/password\n\n"
-            "  3) macOS Keychain (unlock your keychain first if needed):\n"
-            "       security unlock-keychain ~/Library/Keychains/login.keychain-db\n"
-            "       security add-generic-password -a whoop_username -s healthsync"
-            " -T '' -w 'your@email.com' ~/Library/Keychains/login.keychain-db\n"
-            "       security add-generic-password -a whoop_password -s healthsync"
-            " -T '' -w 'yourpassword' ~/Library/Keychains/login.keychain-db"
+            "WHOOP OAuth credentials not found. "
+            "Set WHOOP_CLIENT_ID and WHOOP_CLIENT_SECRET env vars, "
+            "or add them to ~/.healthsync/config.toml:\n\n"
+            "  [oauth]\n"
+            "  client_id = \"your-client-id\"\n"
+            "  client_secret = \"your-client-secret\"\n\n"
+            "Then run 'healthsync auth' once to authorize your account."
         )
 
     raw_sync = raw.get("sync", {})
@@ -134,22 +112,27 @@ def load_config(config_path: Path | None = None) -> Config:
         paths.swift_binary = Path(raw_paths["swift_binary"]).expanduser()
     if "state_file" in raw_paths:
         paths.state_file = Path(raw_paths["state_file"]).expanduser()
+    if "token_file" in raw_paths:
+        paths.token_file = Path(raw_paths["token_file"]).expanduser()
     if "log_file" in raw_paths:
         paths.log_file = Path(raw_paths["log_file"]).expanduser()
+    if "export_dir" in raw_paths:
+        paths.export_dir = Path(raw_paths["export_dir"]).expanduser()
 
     return Config(
-        whoop=WhoopConfig(username=username, password=password),
+        oauth=OAuthConfig(client_id=client_id, client_secret=client_secret),
         sync=SyncConfig(
             lookback_days=raw_sync.get("lookback_days", 7),
-            heart_rate_step_seconds=raw_sync.get("heart_rate_step_seconds", 60),
         ),
         healthkit=HealthKitConfig(
-            write_heart_rate=raw_hk.get("write_heart_rate", True),
+            write_heart_rate=raw_hk.get("write_heart_rate", False),
             write_hrv=raw_hk.get("write_hrv", True),
             write_resting_hr=raw_hk.get("write_resting_hr", True),
             write_respiratory_rate=raw_hk.get("write_respiratory_rate", True),
             write_spo2=raw_hk.get("write_spo2", True),
             write_sleep_stages=raw_hk.get("write_sleep_stages", True),
+            write_active_energy=raw_hk.get("write_active_energy", True),
+            write_skin_temp=raw_hk.get("write_skin_temp", True),
         ),
         paths=paths,
     )

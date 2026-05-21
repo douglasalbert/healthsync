@@ -1,8 +1,14 @@
 import Foundation
 
-struct Payload: Decodable {
-    let quantities: [QuantitySample]
-    let sleepStages: [SleepStageSample]
+// Input envelope. `action` selects the operation; absent ⇒ "write" (backward compat).
+struct Request: Decodable {
+    let action: String?
+    // write
+    let quantities: [QuantitySample]?
+    let sleepStages: [SleepStageSample]?
+    // query-sleep
+    let start: Date?
+    let end: Date?
 }
 
 struct QuantitySample: Decodable {
@@ -16,16 +22,28 @@ struct QuantitySample: Decodable {
 }
 
 struct SleepStageSample: Decodable {
-    let stage: String   // "awake" | "light" | "rem" | "deep"
+    // "awake" | "light" | "rem" | "deep" | "inBed" | "asleep"
+    let stage: String
     let startDate: Date
     let endDate: Date
     let externalUUID: String
 }
 
-struct WriteResponse: Encodable {
+// Output envelope. Only fields relevant to the action are populated.
+struct Response: Encodable {
     let status: String
-    let written: Int
-    let skipped: Int
     let code: Int?
     let message: String?
+    // write
+    let written: Int?
+    let skipped: Int?
+    // query-sleep
+    let sleepSamples: [SleepSampleOut]?
+}
+
+struct SleepSampleOut: Encodable {
+    let startDate: Date
+    let endDate: Date
+    let value: String       // "inBed" | "asleep" | "awake" | "asleepCore" | "asleepDeep" | "asleepREM" | "unknown"
+    let sourceName: String  // e.g. "Apple Watch", "HealthSyncWriter"
 }

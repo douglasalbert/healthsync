@@ -6,27 +6,15 @@ class HKWriter {
 
     // MARK: - Authorization
 
-    func requestAuthorization(for payload: Payload) throws {
+    func requestAuthorization(toShare share: Set<HKSampleType>, toRead read: Set<HKObjectType>) throws {
         guard HKHealthStore.isHealthDataAvailable() else {
             throw HKWriterError.unavailable
-        }
-
-        var shareTypes = Set<HKSampleType>()
-
-        for sample in payload.quantities {
-            if let t = quantityType(for: sample.typeIdentifier) {
-                shareTypes.insert(t)
-            }
-        }
-        if !payload.sleepStages.isEmpty,
-           let t = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) {
-            shareTypes.insert(t)
         }
 
         let sema = DispatchSemaphore(value: 0)
         var authError: Error?
 
-        store.requestAuthorization(toShare: shareTypes, read: []) { _, error in
+        store.requestAuthorization(toShare: share, read: read) { _, error in
             authError = error
             sema.signal()
         }
@@ -37,18 +25,38 @@ class HKWriter {
         }
     }
 
+    func requestWriteAuthorization(quantities: [QuantitySample], hasSleep: Bool) throws {
+        var shareTypes = Set<HKSampleType>()
+        for sample in quantities {
+            if let t = quantityType(for: sample.typeIdentifier) {
+                shareTypes.insert(t)
+            }
+        }
+        if hasSleep, let t = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) {
+            shareTypes.insert(t)
+        }
+        try requestAuthorization(toShare: shareTypes, toRead: [])
+    }
+
+    func requestSleepReadAuthorization() throws {
+        guard let t = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) else {
+            throw HKWriterError.unavailable
+        }
+        try requestAuthorization(toShare: [], toRead: [t])
+    }
+
     // MARK: - Write
 
-    func write(payload: Payload) -> (written: Int, skipped: Int) {
+    func write(quantities: [QuantitySample], sleepStages: [SleepStageSample]) -> (written: Int, skipped: Int) {
         var samples: [HKSample] = []
 
-        for q in payload.quantities {
+        for q in quantities {
             if let sample = makeQuantitySample(q) {
                 samples.append(sample)
             }
         }
 
-        for s in payload.sleepStages {
+        for s in sleepStages {
             if let sample = makeSleepSample(s) {
                 samples.append(sample)
             }
@@ -73,6 +81,48 @@ class HKWriter {
         sema.wait()
 
         return (written, skipped)
+    }
+
+    // MARK: - Query
+
+    func querySleep(start: Date, end: Date) throws -> [SleepSampleOut] {
+        guard let type = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) else {
+            throw HKWriterError.unavailable
+        }
+
+        let predicate = HKQuery.predicateForSamples(withStart: start, end: end, options: [])
+
+        let sema = DispatchSemaphore(value: 0)
+        var results: [SleepSampleOut] = []
+        var queryError: Error?
+
+        let query = HKSampleQuery(
+            sampleType: type,
+            predicate: predicate,
+            limit: HKObjectQueryNoLimit,
+            sortDescriptors: [NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)]
+        ) { _, samples, error in
+            if let samples = samples as? [HKCategorySample] {
+                for s in samples {
+                    results.append(SleepSampleOut(
+                        startDate: s.startDate,
+                        endDate: s.endDate,
+                        value: sleepValueName(s.value),
+                        sourceName: s.sourceRevision.source.name
+                    ))
+                }
+            }
+            queryError = error
+            sema.signal()
+        }
+
+        store.execute(query)
+        sema.wait()
+
+        if let error = queryError {
+            throw error
+        }
+        return results
     }
 
     // MARK: - Sample builders
@@ -119,7 +169,7 @@ class HKWriter {
         )
     }
 
-    // MARK: - Type / unit mapping
+    // MARK: - Type / unit / stage mapping
 
     private func quantityType(for identifier: String) -> HKQuantityType? {
         guard let hkId = hkQuantityIdentifier(for: identifier) else { return nil }
@@ -160,6 +210,13 @@ class HKWriter {
         switch stage {
         case "awake":
             return HKCategoryValueSleepAnalysis.awake.rawValue
+        case "inBed":
+            return HKCategoryValueSleepAnalysis.inBed.rawValue
+        case "asleep":
+            if #available(macOS 14, *) {
+                return HKCategoryValueSleepAnalysis.asleepUnspecified.rawValue
+            }
+            return HKCategoryValueSleepAnalysis.asleep.rawValue
         case "light":
             if #available(macOS 14, *) {
                 return HKCategoryValueSleepAnalysis.asleepCore.rawValue
@@ -179,6 +236,28 @@ class HKWriter {
             return HKCategoryValueSleepAnalysis.awake.rawValue
         }
     }
+}
+
+func sleepValueName(_ raw: Int) -> String {
+    guard let v = HKCategoryValueSleepAnalysis(rawValue: raw) else {
+        return "unknown"
+    }
+    switch v {
+    case .inBed: return "inBed"
+    case .awake: return "awake"
+    case .asleep: return "asleep"
+    default: break
+    }
+    if #available(macOS 14, *) {
+        switch v {
+        case .asleepUnspecified: return "asleep"
+        case .asleepCore: return "asleepCore"
+        case .asleepDeep: return "asleepDeep"
+        case .asleepREM: return "asleepREM"
+        default: return "unknown"
+        }
+    }
+    return "unknown"
 }
 
 enum HKWriterError: Error {

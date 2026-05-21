@@ -3,28 +3,16 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from tenacity import retry, stop_after_attempt, wait_exponential
+import requests
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from healthsync.models import CycleRecord, HRSample, SleepRecord, SleepStage
+from healthsync.models import CycleRecord, HRSample, SleepRecord
+from healthsync.token_store import TokenStore
 
 log = logging.getLogger(__name__)
 
-# WHOOP sleep stage integers → our canonical stage names.
-# Based on WHOOP API conventions; adjust if the whoop-data package
-# returns string stage names instead.
-_STAGE_MAP: dict[int | str, str] = {
-    0: "awake",
-    1: "light",
-    2: "deep",
-    3: "rem",
-    4: "awake",
-    # String variants some API versions return
-    "wake": "awake",
-    "light": "light",
-    "slow_wave": "deep",
-    "rem": "rem",
-    "disturbance": "awake",
-}
+_BASE = "https://api.prod.whoop.com/developer/v2"
+_TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token"
 
 
 class WhoopAPIError(Exception):
@@ -39,136 +27,177 @@ class WhoopRateLimitError(WhoopAPIError):
     pass
 
 
+class WhoopServerError(WhoopAPIError):
+    pass
+
+
+# Retry only on transient failures (rate limits, server errors). 4xx is not retried.
+_retry_transient = retry(
+    retry=retry_if_exception_type((WhoopRateLimitError, WhoopServerError)),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=60),
+    reraise=True,
+)
+
+
 class WhoopClient:
-    def __init__(self, username: str, password: str):
-        from whoop_data import WhoopClient as _Client  # type: ignore[import-untyped]
+    def __init__(self, client_id: str, client_secret: str, token_store: TokenStore):
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._token_store = token_store
 
-        try:
-            self._client = _Client(username=username, password=password)
-        except Exception as exc:
-            raise WhoopAuthError(f"WHOOP authentication failed: {exc}") from exc
-
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=60),
-        reraise=True,
-    )
+    @_retry_transient
     def get_cycles(self, start: datetime, end: datetime) -> list[CycleRecord]:
-        from whoop_data import get_cycle_data  # type: ignore[import-untyped]
+        """Fetch scored recovery records and merge with cycle data for strain."""
+        log.info("Fetching WHOOP recoveries %s → %s", _fmt(start), _fmt(end))
+        raw_recoveries = self._paginate(f"{_BASE}/recovery", {"start": _iso(start), "end": _iso(end)})
 
         log.info("Fetching WHOOP cycles %s → %s", _fmt(start), _fmt(end))
-        try:
-            raw_cycles = get_cycle_data(self._client, start_date=start, end_date=end)
-        except Exception as exc:
-            _raise_api_error(exc)
+        raw_cycles = self._paginate(f"{_BASE}/cycle", {"start": _iso(start), "end": _iso(end)})
+        cycles_by_id = {str(c.get("id", "")): c for c in raw_cycles}
 
         records = []
-        for cycle in raw_cycles or []:
+        for r in raw_recoveries:
+            if r.get("score_state") != "SCORED":
+                continue
+            cycle_id = str(r.get("cycle_id", ""))
+            cycle = cycles_by_id.get(cycle_id, {})
+            score = r.get("score") or {}
+            cycle_score = cycle.get("score") or {}
             try:
-                records.append(self._parse_cycle(cycle))
+                records.append(CycleRecord(
+                    cycle_id=cycle_id,
+                    start=_parse_ts(cycle.get("start") or r.get("created_at")),
+                    end=_parse_ts(cycle.get("end") or r.get("updated_at")),
+                    hrv_ms=_float(score.get("hrv_rmssd_milli")),
+                    resting_hr=_float(score.get("resting_heart_rate")),
+                    spo2=_float(score.get("spo2_percentage")),
+                    recovery_score=_float(score.get("recovery_score")),
+                    strain=_float(cycle_score.get("strain")),
+                    active_energy_kj=_float(cycle_score.get("kilojoules")),
+                    skin_temp_c=_float(score.get("skin_temp_celsius")),
+                ))
             except Exception:
-                log.warning("Skipping unparseable cycle: %s", cycle.get("id", "?"))
-        log.info("Fetched %d cycle(s)", len(records))
+                log.warning("Skipping unparseable recovery: cycle_id=%s", cycle_id)
+
+        log.info("Fetched %d scored cycle(s)", len(records))
         return records
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=60),
-        reraise=True,
-    )
-    def get_heart_rate(
-        self, start: datetime, end: datetime, step: int = 60
-    ) -> list[HRSample]:
-        from whoop_data import get_heart_rate_data  # type: ignore[import-untyped]
+    def get_heart_rate(self, start: datetime, end: datetime, step: int = 60) -> list[HRSample]:
+        log.debug("Heart rate time series is not available in the official WHOOP API")
+        return []
 
-        log.info("Fetching WHOOP heart rate %s → %s (step=%ds)", _fmt(start), _fmt(end), step)
-        try:
-            raw = get_heart_rate_data(
-                self._client, start_date=start, end_date=end, step=step
-            )
-        except Exception as exc:
-            _raise_api_error(exc)
-
-        samples = []
-        for item in raw or []:
-            try:
-                samples.append(self._parse_hr(item))
-            except Exception:
-                log.debug("Skipping unparseable HR sample: %s", item)
-        log.info("Fetched %d HR sample(s)", len(samples))
-        return samples
-
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=60),
-        reraise=True,
-    )
+    @_retry_transient
     def get_sleep(self, start: datetime, end: datetime) -> list[SleepRecord]:
-        from whoop_data import get_sleep_data  # type: ignore[import-untyped]
-
         log.info("Fetching WHOOP sleep %s → %s", _fmt(start), _fmt(end))
-        try:
-            raw = get_sleep_data(self._client, start_date=start, end_date=end)
-        except Exception as exc:
-            _raise_api_error(exc)
+        raw = self._paginate(f"{_BASE}/activity/sleep", {"start": _iso(start), "end": _iso(end)})
 
         records = []
-        for item in raw or []:
+        for item in raw:
+            if item.get("score_state") != "SCORED":
+                continue
             try:
                 records.append(self._parse_sleep(item))
-            except Exception:
-                log.warning("Skipping unparseable sleep record: %s", item.get("id", "?"))
+            except Exception as exc:
+                log.warning("Skipping unparseable sleep record %s: %s", item.get("id", "?"), exc)
+
         log.info("Fetched %d sleep record(s)", len(records))
+        return records
+
+    # --- token management ---
+
+    def _ensure_token(self) -> str:
+        if not self._token_store.has_tokens():
+            raise WhoopAuthError("Not authenticated. Run 'healthsync auth' first.")
+        if self._token_store.is_expired():
+            return self._do_refresh()
+        return self._token_store.access_token()
+
+    def _do_refresh(self) -> str:
+        refresh_tok = self._token_store.refresh_token()
+        if not refresh_tok:
+            raise WhoopAuthError("No refresh token. Run 'healthsync auth' to re-authorize.")
+        log.info("Refreshing WHOOP access token")
+        resp = requests.post(
+            _TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_tok,
+                "client_id": self._client_id,
+                "client_secret": self._client_secret,
+            },
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise WhoopAuthError(
+                f"Token refresh failed ({resp.status_code}). Run 'healthsync auth' to re-authorize."
+            )
+        self._token_store.save(resp.json())
+        return self._token_store.access_token()
+
+    # --- HTTP helpers ---
+
+    def _get(self, url: str, params: dict) -> dict:
+        for attempt in range(2):
+            token = self._ensure_token()
+            try:
+                resp = requests.get(
+                    url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    params=params,
+                    timeout=30,
+                )
+            except requests.exceptions.Timeout:
+                raise WhoopServerError("WHOOP API request timed out")
+            except requests.exceptions.RequestException as exc:
+                raise WhoopServerError(str(exc)) from exc
+
+            if resp.status_code == 401 and attempt == 0:
+                self._do_refresh()
+                continue
+            if resp.status_code == 429:
+                raise WhoopRateLimitError("WHOOP API rate limit exceeded")
+            if 500 <= resp.status_code < 600:
+                raise WhoopServerError(f"WHOOP server error ({resp.status_code}): {resp.text}")
+            if 400 <= resp.status_code < 500:
+                raise WhoopAPIError(f"WHOOP API error ({resp.status_code}): {resp.text}")
+            return resp.json()
+
+        raise WhoopAuthError("Authentication failed after token refresh. Run 'healthsync auth'.")
+
+    def _paginate(self, url: str, params: dict) -> list[dict]:
+        records: list[dict] = []
+        p = dict(params)
+        while True:
+            data = self._get(url, p)
+            records.extend(data.get("records", []))
+            next_token = data.get("next_token")
+            if not next_token:
+                break
+            p["nextToken"] = next_token
         return records
 
     # --- parsers ---
 
-    def _parse_cycle(self, cycle: dict) -> CycleRecord:
-        score = cycle.get("score") or cycle.get("recovery") or {}
-        return CycleRecord(
-            cycle_id=str(cycle.get("id", "")),
-            start=_parse_ts(cycle.get("start") or cycle.get("during", {}).get("lower")),
-            end=_parse_ts(cycle.get("end") or cycle.get("during", {}).get("upper")),
-            hrv_ms=_float(score.get("hrv_rmssd_milli") or score.get("hrv")),
-            resting_hr=_float(score.get("resting_heart_rate") or score.get("rhr")),
-            resp_rate=_float(score.get("respiratory_rate") or cycle.get("respiratory_rate")),
-            spo2=_float(score.get("spo2_percentage") or score.get("spo2")),
-            recovery_score=_float(score.get("recovery_score") or score.get("score")),
-            strain=_float(
-                (cycle.get("strain") or {}).get("score")
-                or cycle.get("strain_score")
-            ),
-        )
-
-    def _parse_hr(self, item: dict) -> HRSample:
-        # whoop-data returns dicts with 'time'/'timestamp' and 'data'/'bpm'/'heart_rate'
-        ts = _parse_ts(item.get("time") or item.get("timestamp"))
-        bpm = float(item.get("data") or item.get("bpm") or item.get("heart_rate", 0))
-        return HRSample(
-            timestamp=ts,
-            bpm=bpm,
-            external_uuid=f"whoop-hr-{ts.strftime('%Y%m%dT%H%M%SZ')}",
-        )
-
     def _parse_sleep(self, item: dict) -> SleepRecord:
         sleep_id = str(item.get("id", ""))
-        start = _parse_ts(item.get("start") or item.get("during", {}).get("lower"))
-        end = _parse_ts(item.get("end") or item.get("during", {}).get("upper"))
+        start = _parse_ts(item.get("start"))
+        end = _parse_ts(item.get("end"))
+        score = item.get("score") or {}
+        summary = score.get("stage_summary") or {}
 
-        stages = []
-        for stage_item in item.get("stages") or item.get("stage_data") or []:
-            stage_name = _STAGE_MAP.get(
-                stage_item.get("stage") or stage_item.get("stage_type"), "awake"
-            )
-            stages.append(
-                SleepStage(
-                    start=_parse_ts(stage_item.get("start")),
-                    end=_parse_ts(stage_item.get("end")),
-                    stage=stage_name,  # type: ignore[arg-type]
-                )
-            )
-
-        return SleepRecord(sleep_id=sleep_id, start=start, end=end, stages=stages)
+        return SleepRecord(
+            sleep_id=sleep_id,
+            start=start,
+            end=end,
+            light_ms=int(summary.get("total_light_sleep_time_milli") or 0),
+            deep_ms=int(summary.get("total_slow_wave_sleep_time_milli") or 0),
+            rem_ms=int(summary.get("total_rem_sleep_time_milli") or 0),
+            awake_ms=int(summary.get("total_awake_time_milli") or 0),
+            in_bed_ms=int(summary.get("total_in_bed_time_milli") or 0),
+            cycle_count=int(summary.get("sleep_cycle_count") or 0),
+            respiratory_rate=_float(score.get("respiratory_rate")),
+        )
 
 
 def _parse_ts(value: str | int | float | None) -> datetime:
@@ -193,10 +222,5 @@ def _fmt(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d")
 
 
-def _raise_api_error(exc: Exception) -> None:
-    msg = str(exc).lower()
-    if "401" in msg or "unauthorized" in msg or "auth" in msg:
-        raise WhoopAuthError(str(exc)) from exc
-    if "429" in msg or "rate" in msg:
-        raise WhoopRateLimitError(str(exc)) from exc
-    raise WhoopAPIError(str(exc)) from exc
+def _iso(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")

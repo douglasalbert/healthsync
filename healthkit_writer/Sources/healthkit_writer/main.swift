@@ -1,12 +1,24 @@
 import Foundation
 import HealthKit
 
-func respond(_ response: WriteResponse) -> Never {
+func emit(_ response: Response) -> Never {
     let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
     let data = (try? encoder.encode(response)) ?? Data()
     FileHandle.standardOutput.write(data)
     FileHandle.standardOutput.write(Data("\n".utf8))
     exit(response.status == "ok" ? 0 : 1)
+}
+
+func emitError(code: Int, message: String) -> Never {
+    emit(Response(
+        status: "error",
+        code: code,
+        message: message,
+        written: nil,
+        skipped: nil,
+        sleepSamples: nil
+    ))
 }
 
 // Read all of stdin
@@ -18,61 +30,76 @@ while true {
     inputData.append(chunk)
 }
 
-// Decode payload
 let decoder = JSONDecoder()
 decoder.dateDecodingStrategy = .iso8601
 
-let payload: Payload
+let request: Request
 do {
-    payload = try decoder.decode(Payload.self, from: inputData)
+    request = try decoder.decode(Request.self, from: inputData)
 } catch {
-    respond(WriteResponse(
-        status: "error",
-        written: 0,
-        skipped: 0,
-        code: -1,
-        message: "JSON decode failed: \(error.localizedDescription)"
-    ))
+    emitError(code: -1, message: "JSON decode failed: \(error.localizedDescription)")
 }
 
 let writer = HKWriter()
+let action = request.action ?? "write"
 
-// Request HealthKit authorization
-do {
-    try writer.requestAuthorization(for: payload)
-} catch HKWriterError.unavailable {
-    respond(WriteResponse(
-        status: "error",
-        written: 0,
-        skipped: 0,
-        code: -2,
-        message: "HealthKit is not available on this device."
+switch action {
+
+case "write":
+    let quantities = request.quantities ?? []
+    let sleepStages = request.sleepStages ?? []
+
+    do {
+        try writer.requestWriteAuthorization(quantities: quantities, hasSleep: !sleepStages.isEmpty)
+    } catch HKWriterError.unavailable {
+        emitError(code: -2, message: "HealthKit is not available on this device.")
+    } catch let error as HKError {
+        emitError(code: error.errorCode, message: error.localizedDescription)
+    } catch {
+        emitError(code: -3, message: "Authorization error: \(error.localizedDescription)")
+    }
+
+    let (written, skipped) = writer.write(quantities: quantities, sleepStages: sleepStages)
+    emit(Response(
+        status: "ok",
+        code: nil,
+        message: nil,
+        written: written,
+        skipped: skipped,
+        sleepSamples: nil
     ))
-} catch let error as HKError {
-    respond(WriteResponse(
-        status: "error",
-        written: 0,
-        skipped: 0,
-        code: error.errorCode,
-        message: error.localizedDescription
-    ))
-} catch {
-    respond(WriteResponse(
-        status: "error",
-        written: 0,
-        skipped: 0,
-        code: -3,
-        message: "Authorization error: \(error.localizedDescription)"
-    ))
+
+case "query-sleep":
+    guard let start = request.start, let end = request.end else {
+        emitError(code: -1, message: "query-sleep requires `start` and `end` ISO8601 dates")
+    }
+
+    do {
+        try writer.requestSleepReadAuthorization()
+    } catch HKWriterError.unavailable {
+        emitError(code: -2, message: "HealthKit is not available on this device.")
+    } catch let error as HKError {
+        emitError(code: error.errorCode, message: error.localizedDescription)
+    } catch {
+        emitError(code: -3, message: "Authorization error: \(error.localizedDescription)")
+    }
+
+    do {
+        let samples = try writer.querySleep(start: start, end: end)
+        emit(Response(
+            status: "ok",
+            code: nil,
+            message: nil,
+            written: nil,
+            skipped: nil,
+            sleepSamples: samples
+        ))
+    } catch let error as HKError {
+        emitError(code: error.errorCode, message: error.localizedDescription)
+    } catch {
+        emitError(code: -3, message: "Query failed: \(error.localizedDescription)")
+    }
+
+default:
+    emitError(code: -1, message: "unknown action: \(action)")
 }
-
-// Write samples
-let (written, skipped) = writer.write(payload: payload)
-
-respond(WriteResponse(
-    status: "ok",
-    written: written,
-    skipped: skipped,
-    code: nil,
-    message: nil
-))

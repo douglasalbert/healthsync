@@ -4,6 +4,7 @@ import json
 import logging
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -41,27 +42,46 @@ class HKWriterBridge:
         total_written = 0
         total_skipped = 0
 
-        # Batch quantity samples to stay within HK limits
         for batch in _chunks(quantities, _BATCH_SIZE):
-            r = self._write({"quantities": batch, "sleepStages": []})
-            total_written += r.written
-            total_skipped += r.skipped
+            r = self._invoke({
+                "action": "write",
+                "quantities": batch,
+                "sleepStages": [],
+            })
+            total_written += r.get("written", 0)
+            total_skipped += r.get("skipped", 0)
 
-        # Sleep stages are typically small; send in one call
         if sleep_stages:
-            r = self._write({"quantities": [], "sleepStages": sleep_stages})
-            total_written += r.written
-            total_skipped += r.skipped
+            r = self._invoke({
+                "action": "write",
+                "quantities": [],
+                "sleepStages": sleep_stages,
+            })
+            total_written += r.get("written", 0)
+            total_skipped += r.get("skipped", 0)
 
         return WriteResult(written=total_written, skipped=total_skipped)
 
-    def _write(self, payload: dict) -> WriteResult:
+    def query_sleep(self, start: datetime, end: datetime) -> list[dict]:
+        """Return HealthKit sleep samples overlapping [start, end].
+
+        Each dict has keys: startDate, endDate, value, sourceName.
+        Returns [] on auth errors so callers can degrade gracefully.
+        """
+        try:
+            response = self._invoke({
+                "action": "query-sleep",
+                "start": _iso(start),
+                "end": _iso(end),
+            })
+        except HKAuthError:
+            log.info("Sleep read authorization not granted; skipping HK sleep lookup")
+            return []
+        return response.get("sleepSamples", [])
+
+    def _invoke(self, payload: dict) -> dict:
         payload_bytes = json.dumps(payload).encode()
-        log.debug(
-            "Calling Swift writer: %d quantities, %d sleep stages",
-            len(payload.get("quantities", [])),
-            len(payload.get("sleepStages", [])),
-        )
+        log.debug("Calling Swift bridge: action=%s", payload.get("action"))
         try:
             result = subprocess.run(
                 [str(self._binary)],
@@ -70,14 +90,14 @@ class HKWriterBridge:
                 timeout=60,
             )
         except subprocess.TimeoutExpired as exc:
-            raise HKWriteError("Swift writer timed out after 60s") from exc
+            raise HKWriteError("Swift bridge timed out after 60s") from exc
 
         try:
             response = json.loads(result.stdout)
         except (json.JSONDecodeError, ValueError) as exc:
             stderr = result.stderr.decode(errors="replace")
             raise HKWriteError(
-                f"Swift writer returned non-JSON output.\nstderr: {stderr}"
+                f"Swift bridge returned non-JSON output.\nstderr: {stderr}"
             ) from exc
 
         if response.get("status") == "error":
@@ -88,12 +108,13 @@ class HKWriterBridge:
                     "HealthKit authorization denied. "
                     "Open System Settings → Privacy & Security → Health and grant access."
                 )
-            raise HKWriteError(f"HealthKit write failed (code {code}): {message}")
+            raise HKWriteError(f"HealthKit call failed (code {code}): {message}")
 
-        return WriteResult(
-            written=response.get("written", 0),
-            skipped=response.get("skipped", 0),
-        )
+        return response
+
+
+def _iso(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _chunks(lst: list, size: int):

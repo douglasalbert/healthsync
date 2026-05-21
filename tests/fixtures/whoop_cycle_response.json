@@ -1,17 +1,20 @@
-[
-  {
-    "id": "cycle-001",
-    "start": "2025-05-18T07:00:00Z",
-    "end": "2025-05-19T07:00:00Z",
-    "score": {
-      "recovery_score": 78.0,
-      "hrv_rmssd_milli": 62.3,
-      "resting_heart_rate": 52.0,
-      "respiratory_rate": 15.2,
-      "spo2_percentage": 97.5
-    },
-    "strain": {
-      "score": 12.4
+{
+  "records": [
+    {
+      "id": 93845,
+      "user_id": 10129,
+      "created_at": "2025-05-18T02:00:00.000Z",
+      "updated_at": "2025-05-18T10:00:00.000Z",
+      "start": "2025-05-18T02:00:00.000Z",
+      "end": "2025-05-18T10:00:00.000Z",
+      "score_state": "SCORED",
+      "score": {
+        "strain": 12.4,
+        "kilojoule": 8288.3,
+        "average_heart_rate": 68,
+        "max_heart_rate": 141
+      }
     }
-  }
-]
+  ],
+  "next_token": null
+}

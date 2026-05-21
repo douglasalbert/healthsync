@@ -1,18 +1,16 @@
-[whoop]
-# Credentials can also be set via WHOOP_USERNAME / WHOOP_PASSWORD env vars.
-# Env vars take precedence over this file.
-username = ""
-password = ""
+[oauth]
+# OAuth2 app credentials from developer.whoop.com.
+# Run 'healthsync auth' once after setting these to authorize your account.
+client_id = ""
+client_secret = ""
 
 [sync]
 # How many days back to pull on the very first run (no prior state).
 lookback_days = 7
-# HR resolution in seconds: 6, 60 (1 min), or 600 (10 min).
-# 60 is recommended — 6-second resolution produces ~100k samples per week.
-heart_rate_step_seconds = 60
 
 [healthkit]
-write_heart_rate = true
+# Heart rate time series is not available from the official WHOOP API.
+write_heart_rate = false
 write_hrv = true
 write_resting_hr = true
 write_respiratory_rate = true
@@ -24,4 +22,5 @@ write_sleep_stages = true
 # Run ./scripts/build_swift.sh once to produce this binary.
 swift_binary = "~/healthsync/healthkit_writer/HealthSyncWriter.app/Contents/MacOS/healthkit-writer"
 state_file = "~/.healthsync/state.json"
+token_file = "~/.healthsync/tokens.json"
 log_file = "~/Library/Logs/healthsync/sync.log"
