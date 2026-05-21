@@ -108,11 +108,20 @@ def load_config(config_path: Path | None = None) -> Config:
 
     if not username or not password:
         raise ConfigError(
-            "WHOOP credentials not found. Set WHOOP_USERNAME and WHOOP_PASSWORD env vars, "
-            "or add them to your config file at ~/.healthsync/config.toml, "
-            "or store them in Keychain:\n"
-            "  security add-generic-password -a whoop_username -s healthsync -w '<your_email>'\n"
-            "  security add-generic-password -a whoop_password -s healthsync -w '<your_password>'"
+            "WHOOP credentials not found. Choose one of:\n\n"
+            "  1) Environment variables (quickest):\n"
+            "       export WHOOP_USERNAME='your@email.com'\n"
+            "       export WHOOP_PASSWORD='yourpassword'\n\n"
+            "  2) Config file at ~/.healthsync/config.toml:\n"
+            "       mkdir -p ~/.healthsync\n"
+            "       cp config/healthsync.toml.example ~/.healthsync/config.toml\n"
+            "       # then fill in username/password\n\n"
+            "  3) macOS Keychain (unlock your keychain first if needed):\n"
+            "       security unlock-keychain ~/Library/Keychains/login.keychain-db\n"
+            "       security add-generic-password -a whoop_username -s healthsync"
+            " -k ~/Library/Keychains/login.keychain-db -T '' -w 'your@email.com'\n"
+            "       security add-generic-password -a whoop_password -s healthsync"
+            " -k ~/Library/Keychains/login.keychain-db -T '' -w 'yourpassword'"
         )
 
     raw_sync = raw.get("sync", {})
